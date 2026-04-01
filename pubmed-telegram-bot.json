@@ -1,0 +1,749 @@
+{
+  "name": "Biomedical Article Summarization",
+  "nodes": [
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Summarize the following research article.\n\n{{ $json.textForSummary }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are an expert biomedical research analyst with deep knowledge \nin neuroscience, clinical trials, and scientific literature.\n\nYou will receive one research article. Return a single JSON object \nwith exactly these keys:\n\n{\n  \"title\": \"...\",\n  \"objective\": \"...\",\n  \"methods\": \"...\",\n  \"key_findings\": \"...\",\n  \"significance\": \"...\",\n  \"abbreviations\": { \"ABBR\": \"Full Name\" },\n  \"speculation\": \"...\",\n  \"limitations\": \"...\"\n}\n\nFIELD INSTRUCTIONS:\n- title: full article title\n- objective: main research question or aim (1 sentence)\n- methods: study design or key methodology (1 sentence)\n- key_findings: most important results (2–3 sentences)\n- significance: clinical, scientific, or translational relevance (1 sentence)\n- abbreviations: key abbreviations used in the article as key-value pairs\n- speculation: broader implications for science and society, \n  understandable to non-specialists (5–10 sentences)\n- limitations: shortcomings or limitations of the study (1–2 sentences)\n\nReturn only the JSON object. No extra text, no markdown, no arrays."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        2928,
+        320
+      ],
+      "id": "13310b70-7915-48df-ac05-778da98e2258",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-4o-mini",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        2816,
+        576
+      ],
+      "id": "bf316ed6-a548-430b-88c4-827b608bead6",
+      "name": "OpenRouter Chat Model",
+      "credentials": {
+        "openRouterApi": {
+          "id": "Pn0WkdLa7qdeNUFM",
+          "name": "OpenRouter account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -80,
+        336
+      ],
+      "id": "efc2f7b0-249c-4355-8889-245d66a7ffbc",
+      "name": "Telegram Trigger",
+      "webhookId": "92a9945f-f23d-410a-8569-9791d4aef5e7",
+      "credentials": {
+        "telegramApi": {
+          "id": "q0bFbyjPYgkSOik5",
+          "name": "articlesummarization_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_CHAT_ID",
+        "text": "={{ $json.text }}{{ $json.esearchresult.retmax }}{{ $json.esearchresult.querytranslation }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3712,
+        464
+      ],
+      "id": "c7eee2be-8f78-4fb8-a4cf-052e53400d05",
+      "name": "Send a text message",
+      "webhookId": "56e949b7-0b6c-405c-bcba-c89b32f9aec4",
+      "credentials": {
+        "telegramApi": {
+          "id": "q0bFbyjPYgkSOik5",
+          "name": "articlesummarization_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== 1. Extract raw LLM output =====\nlet rawText = null;\ntry {\n  rawText = $json.output[0].content[0].text;\n} catch (e) {\n  rawText = null;\n}\n\n// ===== 2. Parse JSON =====\nlet parsed = {};\ntry {\n  parsed = rawText ? JSON.parse(rawText) : {};\n} catch (e) {\n  parsed = {};\n}\n\n// ===== 3. Normalize fields with fallback =====\nconst now = new Date().getFullYear();\n\nconst title = parsed.title && parsed.title.trim() !== '' ? parsed.title.trim() : 'biomedical research';\nconst body = parsed.body && parsed.body.trim() !== '' ? parsed.body.trim() : null;\nconst yearFrom = parsed.year_from && !isNaN(parsed.year_from) ? parsed.year_from : now - 10;\nconst yearTo = parsed.year_to && !isNaN(parsed.year_to) ? parsed.year_to : now;\nlet retmax = parsed.retmax && !isNaN(parsed.retmax) ? Math.min(Math.max(parsed.retmax, 1), 10) : 3;\n\n// ===== 4. Helper function: escape terms for PubMed =====\nfunction escapePubMedTerm(term) {\n  // Laita lainausmerkkeihin jos useampi sana\n  if (/\\s/.test(term)) {\n    return `\"${term}\"`;\n  }\n  return term;\n}\n\n// ===== 5. Process title and body =====\nlet titleTerm = escapePubMedTerm(title);\n\nlet bodyTerms = [];\nif (body) {\n  // Split body by commas or 'and', trim whitespace\n  body.split(/,|\\band\\b/i).forEach(t => {\n    const trimmed = t.trim();\n    if (trimmed) bodyTerms.push(escapePubMedTerm(trimmed));\n  });\n}\n\n// Yhdistä body-termien OR:lla ja lisää PubMed field\nlet bodyQuery = bodyTerms.length ? `(${bodyTerms.join(' OR ')})[Title/Abstract]` : '';\n\n// ===== 6. Build final PubMed query =====\nlet searchTerm = `${titleTerm}[Title]`;\nif (bodyQuery) searchTerm += ` AND ${bodyQuery}`;\nsearchTerm += ` AND ${yearFrom}/01/01:${yearTo}/12/31[PDAT]`;\n\n// ===== 7. Return for next node =====\nreturn [{\n  json: {\n    searchTerm,\n    retmax,\n    debug: {\n      normalized: { title, body, yearFrom, yearTo, retmax },\n      original: $json\n    }\n  }\n}];\n\n\n\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        528,
+        336
+      ],
+      "id": "a64cb7ae-5321-41c6-a38a-1261f7fea40e",
+      "name": "LLM-->Pubmed Query Validator"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "content": "=The user's original request (from Telegram):\n{{ $('Telegram Trigger').item.json.message.text }}\n\nFailed search parameters:\n{{ $('LLM Parses the user\\'s intent').item.json.output[0].content[0].text }}\n\nGenerate expanded search parameters to find relevant articles."
+            },
+            {
+              "role": "system",
+              "content": "You are a biomedical search specialist with deep knowledge of PubMed, \nMeSH terminology, and scientific literature retrieval.\n\nYour task is query expansion: the previous PubMed search returned zero \nresults. You must analyze the failed search parameters and generate \nimproved search terms.\n\nEXPANSION STRATEGIES (apply in order of preference):\n1. Synonyms and alternative spellings\n2. MeSH (Medical Subject Headings) terms\n3. Broader parent concepts\n4. Related mechanisms or processes\n\nRULES:\n- Return ONLY valid JSON, no explanations outside the JSON\n- Keep retmax at the same value as the original\n- Never return empty strings for title or body\n- Output:\n{\n  \"title\": \"\",\n  \"body\": \"\",\n  \"year_from\": ,\n  \"year_to\": ,\n  \"retmax\":\n}\n\nYEAR RULES:\n\n- ALWAYS assume that the current year is 2026\n- Always output a valid range unless explicitly impossible\n- If inferred:\n  year_to = 2026\n  year_from = year_to - inferred range\n\n- Ensure:\n  year_from >= 1900\n  year_to <= 2026"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        1120,
+        592
+      ],
+      "id": "4fe9cfb6-2301-4d3a-a525-65db41461ae5",
+      "name": "Message a model1",
+      "credentials": {
+        "openAiApi": {
+          "id": "GUkQ1DTqDVmcQabe",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== 1. Extract raw LLM output =====\nlet rawText = null;\ntry {\n  rawText = $json.output[0].content[0].text;\n} catch (e) {\n  rawText = null;\n}\n\n// ===== 2. Parse JSON =====\nlet parsed = {};\ntry {\n  parsed = rawText ? JSON.parse(rawText) : {};\n} catch (e) {\n  parsed = {};\n}\n\n// ===== 3. Normalize fields with fallback =====\nconst now = new Date().getFullYear();\n\nconst title = parsed.title && parsed.title.trim() !== '' ? parsed.title.trim() : 'biomedical research';\nconst body = parsed.body && parsed.body.trim() !== '' ? parsed.body.trim() : null;\nconst yearFrom = parsed.year_from && !isNaN(parsed.year_from) ? parsed.year_from : now - 10;\nconst yearTo = parsed.year_to && !isNaN(parsed.year_to) ? parsed.year_to : now;\nlet retmax = parsed.retmax && !isNaN(parsed.retmax) ? Math.min(Math.max(parsed.retmax, 1), 10) : 3;\n\n// ===== 4. Helper function: escape terms for PubMed =====\nfunction escapePubMedTerm(term) {\n  // Laita lainausmerkkeihin jos useampi sana\n  if (/\\s/.test(term)) {\n    return `\"${term}\"`;\n  }\n  return term;\n}\n\n// ===== 5. Process title and body =====\nlet titleTerm = escapePubMedTerm(title);\n\nlet bodyTerms = [];\nif (body) {\n  // Split body by commas or 'and', trim whitespace\n  body.split(/,|\\band\\b/i).forEach(t => {\n    const trimmed = t.trim();\n    if (trimmed) bodyTerms.push(escapePubMedTerm(trimmed));\n  });\n}\n\n// Yhdistä body-termien OR:lla ja lisää PubMed field\nlet bodyQuery = bodyTerms.length ? `(${bodyTerms.join(' OR ')})[Title/Abstract]` : '';\n\n// ===== 6. Build final PubMed query =====\nlet searchTerm = `${titleTerm}[Title]`;\nif (bodyQuery) searchTerm += ` AND ${bodyQuery}`;\nsearchTerm += ` AND ${yearFrom}/01/01:${yearTo}/12/31[PDAT]`;\n\n// ===== 7. Return for next node =====\nreturn [{\n  json: {\n    searchTerm,\n    retmax,\n    debug: {\n      normalized: { title, body, yearFrom, yearTo, retmax },\n      original: $json\n    }\n  }\n}];\n\n\n\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1408,
+        592
+      ],
+      "id": "d49da706-c743-4e33-849e-109402bd2e67",
+      "name": "LLM-->Pubmed Query Validator1"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a specialized biomedical query parser for PubMed.\n\nYour task is to convert a user's natural language message into structured search parameters.\n\nNo explanations, no extra text.\n\n\n\n---\n\nOUTPUT FORMAT (strict):\n\n{\n  \"title\": string | null,\n  \"body\": string | null,\n  \"year_from\": number | null,\n  \"year_to\": number | null,\n  \"retmax\": number | null\n}\n\n---\n\nFIELD DEFINITIONS:\n\n- title:\n  Main scientific concept(s). Keep concise. Prefer 1–3 key terms.\n  Example: \"gut microbiome\", \"type 2 diabetes\", \"Alzheimer disease\"\n\n- body:\n  Secondary aspects, mechanisms, outcomes, or context.\n  Example: \"inflammation\", \"depression\", \"treatment outcomes\"\n\n- year_from / year_to:\n  Use publication year range. Remember that now is the year 2026.\n\n- retmax:\n  Number of articles to retrieve (1–50).\n\n---\n\nCORE RULES:\n\n1. If information is missing → use null (except year, see defaults below).\n\n2. DO NOT invent highly specific scientific claims.\n   Stay general if unsure. \n\n3. If a term appears to be a misspelling of a known biomedical concept,\ncorrect it when confidence is high.\n\nExample:\n\"chopper\" → \"copper\", ''canser'' --> ''cancer''\n\n4. Prefer medically meaningful keywords over casual phrases.\n\n---\n\nINTENT INTERPRETATION RULES:\n\n- \"recent\", \"latest\" → last 5 years\n- \"last decade\" → last 10 years\n- \"new\" → last 3 years\n- no time mentioned → last 10 years\n\n- \"a few\", \"some\" → retmax = 3\n- \"several\" → retmax = 5\n- \"many\", \"more\" → retmax = 10\n\n- If no retmax mentioned → default = 3\n\n---\n\nKEYWORD EXTRACTION STRATEGY:\n\n- Extract the MAIN topic → goes to \"title\"\n- Extract modifiers, effects, or relationships → goes to \"body\"\n\nExample:\n\"gut microbiome and depression\"\n→ title: \"gut microbiome\"\n→ body: \"depression\"\n\n- If only one concept exists → put in title, body = null\n\n---\n\nCLEANING RULES:\n\n- Remove vague words: \"good\", \"best\", \"interesting\", \"important\"\n- Convert lay terms to scientific equivalents when obvious:\n  \"gut health\" → \"gut microbiome\"\n  \"brain health\" → \"neurological function\"\n\n- Keep output concise (no long phrases)\n\n---\n\nYEAR RULES:\n\n- Always output a valid range unless explicitly impossible\n- If inferred:\n  year_to = 2026\n  year_from = year_to - inferred range\n\n- Ensure:\n  year_from >= 1900\n  year_to <= 2026\n\n---\n\nRETMAX RULES:\n\n- Clamp values:\n  min = 1\n  max = 50\n\n---\n\nFAILSAFE:\n\nIf input is extremely vague:\n- Put best guess in \"title\"\n- Set body = null\n- Use default years (last 10 years)\n- retmax = 3\n\n---\n\nEXAMPLES:\n\nInput:\n\"recent studies on gut microbiome and anxiety\"\n\nOutput:\n{\n  \"title\": \"gut microbiome\",\n  \"body\": \"anxiety\",\n  \"year_from\": 2019,\n  \"year_to\": 2024,\n  \"retmax\": 3\n}\n\n---\n\nInput:\n\"cancer immunotherapy breakthroughs last decade give me 5 papers\"\n\nOutput:\n{\n  \"title\": \"cancer immunotherapy\",\n  \"body\": \"treatment outcomes\",\n  \"year_from\": 2015,\n  \"year_to\": 2025,\n  \"retmax\": 5\n}\n\n---\n\nInput:\n\"microbiome\"\n\nOutput:\n{\n  \"title\": \"microbiome\",\n  \"body\": null,\n  \"year_from\": 2015,\n  \"year_to\": 2025,\n  \"retmax\": 3\n}"
+            },
+            {
+              "content": "=Extract PubMed search parameters from the following user message.\n\nUser message:\n\"\"\"\n{{$json.message.text}}\n\"\"\""
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        128,
+        336
+      ],
+      "id": "231f1c7b-dcf8-424c-8189-52b65aeb709a",
+      "name": "LLM Parses the user's intent",
+      "credentials": {
+        "openAiApi": {
+          "id": "GUkQ1DTqDVmcQabe",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "db",
+              "value": "pmc"
+            },
+            {
+              "name": "term",
+              "value": "={{ $json.searchTerm }}"
+            },
+            {
+              "name": "retmax",
+              "value": "={{ $json.retmax }}"
+            },
+            {
+              "name": "retmode",
+              "value": "json"
+            },
+            {
+              "name": "tool",
+              "value": "my_research_tool"
+            },
+            {
+              "name": "email",
+              "value": "your@email.com"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        784,
+        336
+      ],
+      "id": "eeb084fa-f9f5-473a-8c39-39e19ceebdf8",
+      "name": "Fetches matching article IDs from PubMed Central (PMC)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "bbb3d6a3-f0c2-4078-910c-421fe46c27f8",
+              "leftValue": "={{ $json.esearchresult.retmax }}",
+              "rightValue": "0",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        992,
+        336
+      ],
+      "id": "6e10b44c-e455-4926-9555-500c474c89af",
+      "name": "If (Handles zero-result cases)"
+    },
+    {
+      "parameters": {
+        "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi\n",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "db",
+              "value": "pmc"
+            },
+            {
+              "name": "id",
+              "value": "={{ $json.pmcid }}"
+            },
+            {
+              "name": "retmode",
+              "value": "xml"
+            },
+            {
+              "name": "tool",
+              "value": "brain_research_n8n"
+            },
+            {
+              "name": "email",
+              "value": "your@email.com"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1
+            }
+          },
+          "allowUnauthorizedCerts": true,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2256,
+        320
+      ],
+      "id": "c6be816f-cf72-4941-8502-68a3c02180c1",
+      "name": "PubMed Central API (Fetches the full XML content of each article)",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "const ids = $input.first().json.esearchresult.idlist;\nreturn ids.map(id => ({ json: { pmcid: id } }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2032,
+        320
+      ],
+      "id": "31d76ad0-33f7-489d-ab6b-cc802596261e",
+      "name": "Exctract pmcid"
+    },
+    {
+      "parameters": {
+        "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "db",
+              "value": "pmc"
+            },
+            {
+              "name": "term",
+              "value": "={{ $json.searchTerm }}"
+            },
+            {
+              "name": "retmax",
+              "value": "={{ $json.retmax }}"
+            },
+            {
+              "name": "retmode",
+              "value": "json"
+            },
+            {
+              "name": "tool",
+              "value": "my_research_tool"
+            },
+            {
+              "name": "email",
+              "value": "your@email.com"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1584,
+        592
+      ],
+      "id": "cbd1fd96-9ebd-4871-901d-07f0052afb68",
+      "name": "Fetches matching article IDs from PubMed Central (PMC)1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "34c2647c-36f7-4cc0-a18c-ba47c2f15d75",
+              "leftValue": "={{ $json.esearchresult.retmax }}",
+              "rightValue": "0",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1792,
+        592
+      ],
+      "id": "13de3dde-96ac-41cb-8770-d76f982d14d0",
+      "name": "If (Handles zero cases)"
+    },
+    {
+      "parameters": {
+        "content": "# Biomedical Article Summarization — AI Research Pipeline\n\n## This workflow turns a plain-language Telegram message into\n## expert-level biomedical article summaries — fully automated.\n##\n\n## 1. You send a research topic to a Telegram bot in plain language.\n##    The AI parses your intent and builds a precise PubMed search query.\n##\n\n## 2. The workflow searches PubMed Central for matching articles.\n##    If nothing is found, the AI automatically expands the query\n##    using MeSH (Medical Subject Headings) terms and synonyms — then tries again.\n##\n\n## 3. Full article XML is fetched for each result. Key sections\n##    are extracted: abstract, results, discussion, and conclusion.\n##\n\n## 4. An AI agent reads all articles at once and generates a\n##    structured expert summary for each one — objective, methods,\n##    key findings, significance, speculation, and limitations.\n##\n\n## 5. Each summary is formatted and delivered back to you\n##    as a separate Telegram message. No manual research needed.\n##\n\n## Data source: PubMed Central (NCBI EUtils API)\n## Built with: n8n · JavaScript · OpenRouter · OpenAI · Telegram",
+        "height": 960,
+        "width": 944
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -1808,
+        -336
+      ],
+      "typeVersion": 1,
+      "id": "411bf88e-7156-412b-9855-1a5f69315b3c",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        2752,
+        224
+      ],
+      "id": "de0abba7-17fb-43e1-86e0-15bd8f0c38c8",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nfunction stripTags(str) {\n  return str ? str.replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim() : '';\n}\n\nfunction cleanXML(str, maxLength = 2000) {\n  return stripTags(str).substring(0, maxLength);\n}\n\nreturn items.map((item, index) => {\n  const xml = item.json.data || item.json;\n\n  const title = xml.match(/<article-title[^>]*>(.*?)<\\/article-title>/s);\n  const abstract = xml.match(/<abstract[^>]*>(.*?)<\\/abstract>/s);\n  const year = xml.match(/<pub-date[^>]*>.*?<year>(\\d{4})<\\/year>/s);\n  const authorsBlock = xml.match(/<contrib-group[^>]*>(.*?)<\\/contrib-group>/s);\n  const results = xml.match(/<sec[^>]*>.*?<title[^>]*>Results<\\/title>(.*?)<\\/sec>/si);\n  const discussion = xml.match(/<sec[^>]*>.*?<title[^>]*>Discussion<\\/title>(.*?)<\\/sec>/si);\n  const conclusion = xml.match(/<sec[^>]*>.*?<title[^>]*>Conclusion[s]?<\\/title>(.*?)<\\/sec>/si);\n\n  let authors = 'Unknown';\n  if (authorsBlock) {\n    const names = authorsBlock[1].match(/<surname>(.*?)<\\/surname>.*?<given-names>(.*?)<\\/given-names>/gs);\n    if (names) {\n      authors = names.map(n => {\n        const s = n.match(/<surname>(.*?)<\\/surname>/);\n        const g = n.match(/<given-names>(.*?)<\\/given-names>/);\n        return `${g ? g[1] : ''} ${s ? s[1] : ''}`.trim();\n      }).join(', ');\n    }\n  }\n\n  return {\n    json: {\n      pmcid: item.json.pmcid || null,\n      articleIndex: index + 1,\n      textForSummary: `\nTITLE: ${title ? stripTags(title[1]) : 'No title'}\nAUTHORS: ${authors}\nYEAR: ${year ? year[1] : 'Unknown'}\nABSTRACT: ${abstract ? cleanXML(abstract[1], 1500) : 'No abstract'}\nRESULTS: ${results ? cleanXML(results[1], 2000) : 'Not found in XML'}\nDISCUSSION: ${discussion ? cleanXML(discussion[1], 2000) : 'Not found in XML'}\nCONCLUSION: ${conclusion ? cleanXML(conclusion[1], 1000) : 'Not found in XML'}\n      `.trim()\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2464,
+        320
+      ],
+      "id": "d15d1add-a98f-488d-8cd3-34e4d821b8f3",
+      "name": "Parses and assembles key sections"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(item => {\n  // Puretaan JSON-string output-kentästä\n  let data = {};\n  try {\n    data = JSON.parse(item.json.output);\n  } catch (e) {\n    data = {};\n  }\n\n  // Abbreviations käsittely\n  let abbreviations = '';\n  if (typeof data.abbreviations === 'object') {\n    abbreviations = Object.entries(data.abbreviations)\n      .map(([k, v]) => `${k}: ${v}`)\n      .join(', ');\n  } else {\n    abbreviations = data.abbreviations || '';\n  }\n\n  let message = `\n📄 ${data.title}\n\n🎯 Objective:\n${data.objective}\n\n🧪 Methods:\n${data.methods}\n\n🔬 Key Findings:\n${data.key_findings}\n\n🌍 Significance:\n${data.significance}\n\n🔤 Abbreviations:\n${abbreviations}\n\n💡 Speculation:\n${data.speculation}\n\n⚠️ Limitations:\n${data.limitations}\n`.trim();\n\n  if (message.length > 4000) {\n    message = message.substring(0, 3900) + '\\n\\n... (truncated)';\n  }\n\n  return { json: { text: message } };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3296,
+        272
+      ],
+      "id": "7c103b60-9c06-4404-9b5a-5b0376b0e8f0",
+      "name": "Format Telegram Message"
+    },
+    {
+      "parameters": {
+        "content": "# TRIGGER — Telegram Bot\n## Send any research topic in plain language\n## to the bot. This is where the workflow starts.\n## Example: \"gut microbiome and anxiety, last 5 years, 3 papers\"",
+        "height": 384,
+        "width": 480
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -624,
+        224
+      ],
+      "typeVersion": 1,
+      "id": "aef2df3b-c097-4ac3-914b-2e6777097f0c",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "# STEP 2 — Query Builder & PubMed Search\n## The AI output is validated and converted\n## into a precise PubMed search string.\n## The main topic is searched from article titles only.\n## The subtopic is searched from titles and abstracts.\n## Example: \"gut microbiome\"[Title] AND\n## (anxiety)[Title/Abstract] AND\n## TIME SPAN\n## The query is then sent to NCBI's ESearch API\n## which returns a list of matching article IDs.",
+        "height": 432,
+        "width": 880
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        144,
+        -112
+      ],
+      "typeVersion": 1,
+      "id": "31138278-34c5-4a7e-bb8d-318d4a999768",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "# STEP 3 — Query Expansion (Fallback)\n## If the search returned no results, GPT-4o-mini\n## analyzes the failed query and generates broader\n## search terms using MeSH vocabulary and synonyms.\n## notifies you that nothing was found.",
+        "height": 272,
+        "width": 720
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1184,
+        784
+      ],
+      "typeVersion": 1,
+      "id": "b159b369-d519-4566-9263-e4fc2229ccdd",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "content": "# STEP 4 — Article Fetching & Parsing\n## Each article ID is used to fetch the full\n## article XML from NCBI's EFetch API one by one.\n## Key sections are then extracted from the XML:\n## title, authors, year, abstract, results,\n## discussion, and conclusion.",
+        "height": 272,
+        "width": 720
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1952,
+        16
+      ],
+      "typeVersion": 1,
+      "id": "ae058903-7c4d-4ee3-9f02-9f469c11f691",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "content": "# STEP 5 — AI Summarization & Delivery\n## Each article is sent individually to GPT-4o-mini\n## which returns a structured expert summary covering\n## objective, methods, key findings, significance,\n## abbreviations, speculation, and limitations.\n## The summary is formatted and delivered back\n## to you as a Telegram message.",
+        "height": 320,
+        "width": 672
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2736,
+        -128
+      ],
+      "typeVersion": 1,
+      "id": "cddb2c51-55bb-4f8f-9881-f781a8e3d1b5",
+      "name": "Sticky Note5"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "OpenRouter Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "LLM Parses the user's intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM-->Pubmed Query Validator": {
+      "main": [
+        [
+          {
+            "node": "Fetches matching article IDs from PubMed Central (PMC)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model1": {
+      "main": [
+        [
+          {
+            "node": "LLM-->Pubmed Query Validator1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM-->Pubmed Query Validator1": {
+      "main": [
+        [
+          {
+            "node": "Fetches matching article IDs from PubMed Central (PMC)1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Parses the user's intent": {
+      "main": [
+        [
+          {
+            "node": "LLM-->Pubmed Query Validator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetches matching article IDs from PubMed Central (PMC)": {
+      "main": [
+        [
+          {
+            "node": "If (Handles zero-result cases)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If (Handles zero-result cases)": {
+      "main": [
+        [
+          {
+            "node": "Exctract pmcid",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Message a model1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PubMed Central API (Fetches the full XML content of each article)": {
+      "main": [
+        [
+          {
+            "node": "Parses and assembles key sections",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exctract pmcid": {
+      "main": [
+        [
+          {
+            "node": "PubMed Central API (Fetches the full XML content of each article)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetches matching article IDs from PubMed Central (PMC)1": {
+      "main": [
+        [
+          {
+            "node": "If (Handles zero cases)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If (Handles zero cases)": {
+      "main": [
+        [
+          {
+            "node": "Exctract pmcid",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "Format Telegram Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parses and assembles key sections": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Telegram Message": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "57888e6d-2eae-41ce-b8f7-bbb680ec7b64",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+  },
+  "id": "rUBPr01V4uU5t8Rj",
+  "tags": []
+}
