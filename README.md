@@ -3,7 +3,7 @@ A Telegram bot that searches PubMed Central and delivers  AI-generated biomedica
 # PubMed Telegram Bot
 
 A Telegram bot that lets you search and summarize biomedical 
-research articles using plain language — no technical knowledge required.
+research articles using plain language.
 
 ## What it does
 
